@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SUMO Live Dashboard</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        line-height: 1.6;
+        background: #f4f4f9;
+        color: #333;
+        margin: 0;
+        padding: 20px;
+      }
+      .container {
+        max-width: 900px;
+        margin: auto;
+        background: #fff;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      h1,
+      h2 {
+        color: #1a1a1a;
+      }
+      #status-bar {
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+        font-weight: bold;
+      }
+      .status-connected {
+        background-color: #d4edda;
+        color: #155724;
+      }
+      .status-disconnected {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+      pre {
+        background: #2d2d2d;
+        color: #f8f8f2;
+        padding: 15px;
+        border-radius: 5px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: "Courier New", Courier, monospace;
+      }
+      #live-status p {
+        margin: 8px 0;
+        font-size: 1.1em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>SUMO Live Dashboard</h1>
+      <div id="status-bar" class="status-disconnected">
+        Status: <span id="status">Connecting...</span>
+      </div>
+
+      <h2>Live Traffic Status</h2>
+      <div id="live-status">
+        <p><strong>Current Step:</strong> <span id="step">N/A</span></p>
+        <p>
+          <strong>Green Light For:</strong>
+          <span id="green-light" style="font-weight: bold; color: #155724"
+            >---</span
+          >
+        </p>
+        <h3>Vehicles Waiting:</h3>
+        <div id="vehicle-counts"></div>
+      </div>
+
+      <hr style="margin: 30px 0" />
+
+      <h2>Raw Technical Data (JSON)</h2>
+      <pre><code id="data-container">Waiting for data...</code></pre>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const statusBarEl = document.getElementById("status-bar");
+      const stepEl = document.getElementById("step");
+      const greenLightEl = document.getElementById("green-light");
+      const vehicleCountsEl = document.getElementById("vehicle-counts");
+      const dataContainerEl = document.getElementById("data-container");
+
+      const socket = new WebSocket("ws://localhost:8000/ws");
+
+      socket.onopen = (event) => {
+        console.log("WebSocket connection established.");
+        statusEl.textContent = "Connected";
+        statusBarEl.className = "status-connected";
+      };
+
+      socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.status === "finished") {
+          statusEl.textContent = "Simulation Finished";
+          statusBarEl.className = "status-connected";
+          return;
+        }
+
+        // --- POPULATE THE NEW DASHBOARD ---
+        stepEl.textContent = data.step;
+        greenLightEl.textContent = data.green_direction;
+
+        // Clear previous counts and build the new list
+        vehicleCountsEl.innerHTML = "";
+        for (const direction in data.waiting_vehicles) {
+          const count = data.waiting_vehicles[direction];
+          const p = document.createElement("p");
+          p.innerHTML = `<strong>${direction}:</strong> ${count} vehicles`;
+          vehicleCountsEl.appendChild(p);
+        }
+
+        // Update the raw JSON view with the raw_data part
+        dataContainerEl.textContent = JSON.stringify(data.raw_data, null, 2);
+      };
+
+      socket.onclose = (event) => {
+        console.log("WebSocket connection closed.");
+        statusEl.textContent = "Disconnected";
+        statusBarEl.className = "status-disconnected";
+      };
+
+      socket.onerror = (error) => {
+        console.error("WebSocket Error:", error);
+        statusEl.textContent = "Connection Error!";
+        statusBarEl.className = "status-disconnected";
+      };
+    </script>
+  </body>
+</html>
