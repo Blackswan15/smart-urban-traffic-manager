@@ -3,7 +3,7 @@ import os
 
 # --- Configuration ---
 # This script will work with any SUMO config file.
-SUMO_CONFIG_FILE = "../sumo_files/newsumo.sumocfg"
+SUMO_CONFIG_FILE = "../sumo_files/f1.sumocfg"
 
 # --- SUMO Connection ---
 sumo_binary = os.path.join(os.environ.get("SUMO_HOME", "."), "bin", "sumo-gui")

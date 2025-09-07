@@ -25,7 +25,8 @@ def run_simulation_endpoint():
     """
     try:
         # Configure and create the simulation manager
-        sumo_config_file = "../sumo_files/newsumo.sumocfg"
+        # Ensure this path is correct relative to where you run uvicorn
+        sumo_config_file = "../sumo_files/f1.sumocfg"
         sim_manager = SimulationManager(sumo_config_file, use_gui=True)
         
         # Run the simulation in a separate thread so the API doesn't block
