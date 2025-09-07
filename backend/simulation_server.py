@@ -30,16 +30,40 @@ PHASE_MAPS = {
 # --- END OF CONFIGURATION ---
 
 
-# --- Your Original SimulationManager Class ---
+# --- SimulationManager Class (Updated for Manual Control) ---
 MIN_GREEN_TIME = 10
 YELLOW_PHASE_DURATION = 4
 
 class SimulationManager:
-    def __init__(self, sumo_cfg, use_gui=True, max_steps=5000):
+    def __init__(self, sumo_cfg, command_queue: queue.Queue, use_gui=True, max_steps=5000):
         self.sumo_cfg = sumo_cfg
+        self.command_queue = command_queue
         self.use_gui = use_gui
         self.max_steps = max_steps
         self.traffic_lights = {}
+        # NEW: State for manual control
+        self.control_mode = "auto"
+        self.manual_phase_target = None
+
+    def _process_commands(self):
+        """Check for and apply commands from the frontend."""
+        try:
+            command_data = self.command_queue.get_nowait()
+            command = command_data.get("command")
+            value = command_data.get("value")
+
+            if command == "set_mode":
+                self.control_mode = value.lower()
+                print(f"Control mode changed to: {self.control_mode}")
+                # When switching to manual, don't change the light until a button is pressed
+                self.manual_phase_target = None
+            
+            elif command == "force_phase" and self.control_mode == "manual":
+                self.manual_phase_target = value
+                print(f"Manual override: Forcing phase {self.manual_phase_target}")
+
+        except queue.Empty:
+            pass # No new commands
 
     def run(self, data_queue: queue.Queue):
         """Starts SUMO, runs the simulation, and puts translated data into the queue."""
@@ -54,45 +78,48 @@ class SimulationManager:
         step = 0
         try:
             while step < self.max_steps and traci.simulation.getMinExpectedNumber() > 0:
+                # NEW: Process commands at the start of each step
+                self._process_commands()
+
                 traci.simulationStep()
                 
+                # --- Control Logic ---
+                if self.control_mode == "auto":
+                    # Run the algorithm only in auto mode
+                    for tls_id in self.traffic_lights:
+                        self._control_traffic_light_state_machine(tls_id, step, traci.trafficlight.getPhase(tls_id))
+                
+                elif self.control_mode == "manual":
+                    # In manual mode, only apply a forced phase
+                    if self.manual_phase_target is not None:
+                        for tls_id in self.traffic_lights:
+                            # Prevent constant switching to the same phase by checking first
+                            if traci.trafficlight.getPhase(tls_id) != self.manual_phase_target:
+                                traci.trafficlight.setPhase(tls_id, self.manual_phase_target)
+                
                 # --- GATHER AND TRANSLATE DATA ---
-                # 1. Get the raw data from Traci
                 raw_vehicle_counts = {edge_id: traci.edge.getLastStepVehicleNumber(edge_id) 
                                       for edge_id in all_edge_ids}
-
-                # 2. Create a new, user-friendly data structure
                 human_readable_data = {
                     "step": step,
                     "waiting_vehicles": {},
                     "green_direction": "Unknown",
-                    "raw_data": {} # Keep raw data for the JSON view
+                    "control_mode": self.control_mode, # NEW: Send current mode to frontend
+                    "raw_data": {}
                 }
-
-                # 3. Translate vehicle counts using the EDGE_TO_DIRECTION_MAP
                 for edge_id, direction in EDGE_TO_DIRECTION_MAP.items():
                     human_readable_data["waiting_vehicles"][direction] = raw_vehicle_counts.get(edge_id, 0)
-
-                # 4. Translate traffic light states
                 for tls_id, phase_map in PHASE_MAPS.items():
                     if tls_id in self.traffic_lights:
                         current_phase = traci.trafficlight.getPhase(tls_id)
                         phase_description = phase_map.get(current_phase, f"Yellow/Transition (Phase {current_phase})")
                         human_readable_data["green_direction"] = phase_description
-                
-                # 5. (Optional) Add raw data for the technical view on the frontend
                 human_readable_data['raw_data'] = {
                     'vehicle_counts_per_edge': raw_vehicle_counts,
                     'traffic_light_id': list(PHASE_MAPS.keys())[0],
                     'current_phase_index': traci.trafficlight.getPhase(list(PHASE_MAPS.keys())[0])
                 }
-
-                # --- PUT THE NEW, SIMPLIFIED DATA IN QUEUE ---
                 data_queue.put(human_readable_data)
-                
-                # --- Control Logic ---
-                for tls_id in self.traffic_lights:
-                    self._control_traffic_light_state_machine(tls_id, step, traci.trafficlight.getPhase(tls_id))
                     
                 step += 1
         finally:
@@ -173,6 +200,7 @@ class SimulationManager:
 # --- FastAPI and WebSocket Setup ---
 app = FastAPI()
 data_queue = queue.Queue()
+command_queue = queue.Queue() # NEW queue for incoming commands
 
 class ConnectionManager:
     def __init__(self):
@@ -190,7 +218,8 @@ manager = ConnectionManager()
 
 def run_simulation():
     """Function to be run in a separate thread."""
-    sim_manager = SimulationManager("f1.sumocfg")
+    # Pass the command queue to the manager
+    sim_manager = SimulationManager("f1.sumocfg", command_queue=command_queue)
     sim_manager.run(data_queue)
 
 async def broadcast_data():
@@ -222,7 +251,15 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            # MODIFIED: Wait for a message from the client
+            data = await websocket.receive_text()
+            try:
+                command_data = json.loads(data)
+                # Put the received command onto the queue for the simulation thread
+                command_queue.put(command_data)
+            except json.JSONDecodeError:
+                print(f"Received invalid JSON from client: {data}")
+
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         print("Client disconnected")

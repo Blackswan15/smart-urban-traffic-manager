@@ -57,10 +57,23 @@
   </head>
   <body>
     <div class="container">
-      <h1>SUMO Live Dashboard</h1>
+      <h1>🚦 SUMO Live Dashboard</h1>
       <div id="status-bar" class="status-disconnected">
         Status: <span id="status">Connecting...</span>
       </div>
+
+      <h2>Manual Controls</h2>
+      <div id="controls">
+        <p>
+          <strong>Control Mode:</strong> <span id="control-mode">AUTO</span>
+        </p>
+        <button id="toggle-mode-btn">Switch to MANUAL Mode</button>
+        <div id="manual-buttons" style="display: none; margin-top: 10px">
+          <button id="force-ns-btn">Force North-South Green</button>
+          <button id="force-ew-btn">Force East-West Green</button>
+        </div>
+      </div>
+      <hr style="margin: 30px 0" />
 
       <h2>Live Traffic Status</h2>
       <div id="live-status">
@@ -76,41 +89,76 @@
       </div>
 
       <hr style="margin: 30px 0" />
-
       <h2>Raw Technical Data (JSON)</h2>
       <pre><code id="data-container">Waiting for data...</code></pre>
     </div>
 
     <script>
+      // --- Get references to ALL elements, including the new ones ---
       const statusEl = document.getElementById("status");
       const statusBarEl = document.getElementById("status-bar");
       const stepEl = document.getElementById("step");
       const greenLightEl = document.getElementById("green-light");
       const vehicleCountsEl = document.getElementById("vehicle-counts");
       const dataContainerEl = document.getElementById("data-container");
+      const controlModeEl = document.getElementById("control-mode");
+      const toggleModeBtn = document.getElementById("toggle-mode-btn");
+      const manualButtonsEl = document.getElementById("manual-buttons");
+      const forceNsBtn = document.getElementById("force-ns-btn");
+      const forceEwBtn = document.getElementById("force-ew-btn");
 
       const socket = new WebSocket("ws://localhost:8000/ws");
 
+      function sendCommand(command, value) {
+        if (socket.readyState === WebSocket.OPEN) {
+          const message = JSON.stringify({ command, value });
+          console.log("Sending command:", message);
+          socket.send(message);
+        }
+      }
+
+      // Add event listeners to the control buttons
+      toggleModeBtn.addEventListener("click", () => {
+        const currentMode = controlModeEl.textContent;
+        const newMode = currentMode === "AUTO" ? "MANUAL" : "AUTO";
+        sendCommand("set_mode", newMode);
+      });
+
+      // Use the phase indices from your Python config
+      forceNsBtn.addEventListener("click", () => sendCommand("force_phase", 2));
+      forceEwBtn.addEventListener("click", () => sendCommand("force_phase", 0));
+
+      // This handler now correctly updates the status to "Connected"
       socket.onopen = (event) => {
         console.log("WebSocket connection established.");
         statusEl.textContent = "Connected";
         statusBarEl.className = "status-connected";
       };
 
+      // This handler is updated to populate all the new dashboard elements
       socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
-
         if (data.status === "finished") {
           statusEl.textContent = "Simulation Finished";
           statusBarEl.className = "status-connected";
           return;
         }
 
-        // --- POPULATE THE NEW DASHBOARD ---
+        // Populate the dashboard
         stepEl.textContent = data.step;
         greenLightEl.textContent = data.green_direction;
 
-        // Clear previous counts and build the new list
+        // Update the control mode display
+        controlModeEl.textContent = data.control_mode.toUpperCase();
+        if (data.control_mode === "manual") {
+          toggleModeBtn.textContent = "Switch to AUTO Mode";
+          manualButtonsEl.style.display = "block";
+        } else {
+          toggleModeBtn.textContent = "Switch to MANUAL Mode";
+          manualButtonsEl.style.display = "none";
+        }
+
+        // Populate the vehicle counts
         vehicleCountsEl.innerHTML = "";
         for (const direction in data.waiting_vehicles) {
           const count = data.waiting_vehicles[direction];
@@ -119,7 +167,7 @@
           vehicleCountsEl.appendChild(p);
         }
 
-        // Update the raw JSON view with the raw_data part
+        // Update the raw JSON view
         dataContainerEl.textContent = JSON.stringify(data.raw_data, null, 2);
       };
 
