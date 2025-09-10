@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Advanced SUMO Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <div class="dashboard-layout">
+        <div class="controls-panel">
+            <div class="panel-section">
+                <h1>🚦 SUMO Dashboard</h1>
+                <div id="status-bar" class="status-disconnected">Status: <span id="status">Connecting...</span></div>
+            </div>
+
+            <div class="panel-section">
+                <h2>Live Stats</h2>
+                <p><strong>Current Step:</strong> <span id="step">N/A</span></p>
+                <p><strong>Green Light For:</strong> <span id="green-light">---</span></p>
+                <h3>Vehicles Waiting:</h3>
+                <div id="vehicle-counts"></div>
+            </div>
+
+            <div class="panel-section">
+                <h2>Manual Controls</h2>
+                <p><strong>Control Mode:</strong> <span id="control-mode">AUTO</span></p>
+                <button id="toggle-mode-btn">Switch to MANUAL Mode</button>
+                <div id="manual-buttons" style="display: none;">
+                    <button id="force-ns-btn">Force North-South Green</button>
+                    <button id="force-ew-btn">Force East-West Green</button>
+                </div>
+            </div>
+        </div>
+        <div class="visualization-panel">
+            <h2>Live Intersection View</h2>
+            <canvas id="simulation-canvas"></canvas>
+        </div>
+    </div>
+    <script src="/static/renderer.js"></script>
+    <script src="/static/main.js"></script>
+</body>
+</html>

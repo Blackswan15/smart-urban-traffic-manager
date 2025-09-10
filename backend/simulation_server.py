@@ -1,136 +1,113 @@
-import traci
+import asyncio
+import json
 import os
+import queue
 import sys
 import threading
-import asyncio
-import queue
-import json
-import time # <-- 1. IMPORT THE TIME MODULE
-from typing import List
+from typing import List, Dict, Any
 
+import traci
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-# --- 🗺️ CONFIGURATION: Mappings for your 'f1.net.xml' file ---
+from network_parser import parse_network
 
-# Map SUMO edge IDs to cardinal directions based on your network file.
-EDGE_TO_DIRECTION_MAP = {
-    "E3": "North",  # Edge for traffic coming FROM the North
-    "-E2": "South", # Edge for traffic coming FROM the South
-    "-E0": "East",  # Edge for traffic coming FROM the East
-    "E0": "West"   # Edge for traffic coming FROM the West
-}
-
-# Map the traffic light phase INDEX to a clear description.
-PHASE_MAPS = {
-    "clusterJ10_J14_J15_J16": {
-        0: "East-West Green",
-        2: "North-South Green",
-    }
-}
-# --- END OF CONFIGURATION ---
-
-
-# --- SimulationManager Class (Updated for Manual Control) ---
+# --- CONFIGURATION ---
+SUMO_CONFIG_FILE = "f1.sumocfg"
+NETWORK_FILE = "f1.net.xml"
+EDGE_TO_DIRECTION_MAP = {"E3": "North", "-E2": "South", "-E0": "East", "E0": "West"}
+PHASE_MAPS = {"clusterJ10_J14_J15_J16": {0: "East-West Green", 2: "North-South Green"}}
 MIN_GREEN_TIME = 10
 YELLOW_PHASE_DURATION = 4
 
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active_connections.append(ws)
+    def disconnect(self, ws: WebSocket):
+        self.active_connections.remove(ws)
+    async def broadcast(self, msg: str):
+        for conn in self.active_connections:
+            await conn.send_text(msg)
+
+# --- SIMULATION MANAGER ---
 class SimulationManager:
-    def __init__(self, sumo_cfg, command_queue: queue.Queue, use_gui=True, max_steps=5000):
+    def __init__(self, sumo_cfg, command_queue: queue.Queue, use_gui=True):
         self.sumo_cfg = sumo_cfg
         self.command_queue = command_queue
         self.use_gui = use_gui
-        self.max_steps = max_steps
         self.traffic_lights = {}
-        # NEW: State for manual control
         self.control_mode = "auto"
         self.manual_phase_target = None
+        self.manual_phase_changed = False
 
     def _process_commands(self):
-        """Check for and apply commands from the frontend."""
         try:
-            command_data = self.command_queue.get_nowait()
-            command = command_data.get("command")
-            value = command_data.get("value")
-
+            cmd = self.command_queue.get_nowait()
+            command, value = cmd.get("command"), cmd.get("value")
             if command == "set_mode":
                 self.control_mode = value.lower()
-                print(f"Control mode changed to: {self.control_mode}")
-                # When switching to manual, don't change the light until a button is pressed
                 self.manual_phase_target = None
-            
+                print(f"Control mode changed to: {self.control_mode}")
             elif command == "force_phase" and self.control_mode == "manual":
-                self.manual_phase_target = value
-                print(f"Manual override: Forcing phase {self.manual_phase_target}")
-
+                if self.manual_phase_target != value:
+                    self.manual_phase_target = value
+                    self.manual_phase_changed = True
+                    print(f"Manual override: Forcing phase {self.manual_phase_target}")
         except queue.Empty:
-            pass # No new commands
+            pass
 
     def run(self, data_queue: queue.Queue):
-        """Starts SUMO, runs the simulation, and puts translated data into the queue."""
         sumo_binary = self._get_sumo_binary()
-        if not sumo_binary:
-            return
-        
+        if not sumo_binary: return
         traci.start([sumo_binary, "-c", self.sumo_cfg])
         self._discover_network_and_phases()
-        all_edge_ids = traci.edge.getIDList()
-
+        
         step = 0
-        try:
-            while step < self.max_steps and traci.simulation.getMinExpectedNumber() > 0:
-                # NEW: Process commands at the start of each step
-                self._process_commands()
+        while traci.simulation.getMinExpectedNumber() > 0:
+            self._process_commands()
 
-                traci.simulationStep()
-                
-                time.sleep(1) # <-- 2. ADD THE 1-SECOND (1000ms) DELAY HERE
+            if self.control_mode == "manual" and self.manual_phase_changed:
+                for tls_id in self.traffic_lights:
+                    traci.trafficlight.setPhase(tls_id, self.manual_phase_target)
+                self.manual_phase_changed = False
+            
+            traci.simulationStep()
+            
+            if self.control_mode == "auto":
+                for tls_id in self.traffic_lights:
+                    self._control_traffic_light_state_machine(tls_id, traci.trafficlight.getPhase(tls_id))
 
-                # --- Control Logic ---
-                if self.control_mode == "auto":
-                    # Run the algorithm only in auto mode
-                    for tls_id in self.traffic_lights:
-                        self._control_traffic_light_state_machine(tls_id, step, traci.trafficlight.getPhase(tls_id))
-                
-                elif self.control_mode == "manual":
-                    # In manual mode, only apply a forced phase
-                    if self.manual_phase_target is not None:
-                        for tls_id in self.traffic_lights:
-                            # Prevent constant switching to the same phase by checking first
-                            if traci.trafficlight.getPhase(tls_id) != self.manual_phase_target:
-                                traci.trafficlight.setPhase(tls_id, self.manual_phase_target)
-                
-                # --- GATHER AND TRANSLATE DATA ---
-                raw_vehicle_counts = {edge_id: traci.edge.getLastStepVehicleNumber(edge_id) 
-                                      for edge_id in all_edge_ids}
-                human_readable_data = {
-                    "step": step,
-                    "waiting_vehicles": {},
-                    "green_direction": "Unknown",
-                    "control_mode": self.control_mode, # NEW: Send current mode to frontend
-                    "raw_data": {}
-                }
-                for edge_id, direction in EDGE_TO_DIRECTION_MAP.items():
-                    human_readable_data["waiting_vehicles"][direction] = raw_vehicle_counts.get(edge_id, 0)
-                for tls_id, phase_map in PHASE_MAPS.items():
-                    if tls_id in self.traffic_lights:
-                        current_phase = traci.trafficlight.getPhase(tls_id)
-                        phase_description = phase_map.get(current_phase, f"Yellow/Transition (Phase {current_phase})")
-                        human_readable_data["green_direction"] = phase_description
-                
-                # Note: The 'raw_data' key is still here but not used by the dashboard. It can be removed if you want.
-                human_readable_data['raw_data'] = {
-                    'vehicle_counts_per_edge': raw_vehicle_counts,
-                    'traffic_light_id': list(PHASE_MAPS.keys())[0],
-                    'current_phase_index': traci.trafficlight.getPhase(list(PHASE_MAPS.keys())[0])
-                }
-                data_queue.put(human_readable_data)
-                        
-                step += 1
-        finally:
-            traci.close()
-            print("Simulation finished and Traci closed.")
-            data_queue.put(None)
+            data_queue.put(self._gather_data(step))
+            step += 1
+        
+        traci.close()
+        data_queue.put(None)
+
+    def _gather_data(self, step: int) -> Dict[str, Any]:
+        vehicles = [{
+            "id": vid, "x": pos[0], "y": pos[1],
+            "angle": traci.vehicle.getAngle(vid),
+            "speed": traci.vehicle.getSpeed(vid)
+        } for vid, pos in [(v, traci.vehicle.getPosition(v)) for v in traci.vehicle.getIDList()]]
+
+        tls_states = {tls_id: {"state": traci.trafficlight.getRedYellowGreenState(tls_id)} for tls_id in self.traffic_lights}
+        waiting_counts = {direction: traci.edge.getLastStepHaltingNumber(edge) for edge, direction in EDGE_TO_DIRECTION_MAP.items()}
+        
+        green_direction = "Unknown"
+        for tls_id, phase_map in PHASE_MAPS.items():
+            if tls_id in self.traffic_lights:
+                current_phase = traci.trafficlight.getPhase(tls_id)
+                green_direction = phase_map.get(current_phase, f"Yellow (Phase {current_phase})")
+
+        return {
+            "step": step, "waiting_vehicles": waiting_counts,
+            "green_direction": green_direction, "control_mode": self.control_mode,
+            "vehicles": vehicles, "tlsState": tls_states
+        }
 
     def _discover_network_and_phases(self):
         all_tls_ids = traci.trafficlight.getIDList()
@@ -157,14 +134,12 @@ class SimulationManager:
                             phase_to_lanes_map[phase_idx].add(link[0])
             self.traffic_lights[tls_id] = {
                 'phase_to_lanes': {p: list(l) for p, l in phase_to_lanes_map.items() if l},
-                'yellow_phase_map': yellow_phase_map,
-                'timer': 0,
-                'state': 'GREEN',
-                'target_phase': None
+                'yellow_phase_map': yellow_phase_map, 'timer': 0,
+                'state': 'GREEN', 'target_phase': None
             }
         print("Discovered and mapped traffic light phases.")
 
-    def _control_traffic_light_state_machine(self, tls_id, step, current_phase_index):
+    def _control_traffic_light_state_machine(self, tls_id, current_phase_index):
         tls_data = self.traffic_lights[tls_id]
         tls_data['timer'] += 1
         if tls_data['state'] == 'YELLOW':
@@ -196,80 +171,42 @@ class SimulationManager:
 
     def _get_sumo_binary(self):
         if 'SUMO_HOME' in os.environ:
-            sumo_home = os.environ['SUMO_HOME']
-            binary = "sumo-gui" if self.use_gui else "sumo"
-            return os.path.join(sumo_home, "bin", binary)
-        else:
-            sys.exit("please declare environment variable 'SUMO_HOME'")
+            return os.path.join(os.environ['SUMO_HOME'], "bin", "sumo-gui" if self.use_gui else "sumo")
+        sys.exit("Please declare environment variable 'SUMO_HOME'")
 
-# --- FastAPI and WebSocket Setup ---
+# --- FASTAPI APP ---
 app = FastAPI()
-data_queue = queue.Queue()
-command_queue = queue.Queue() # NEW queue for incoming commands
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
-
+data_queue, command_queue = queue.Queue(), queue.Queue()
+app.mount("/static", StaticFiles(directory="static"), name="static")
+network_data = parse_network(NETWORK_FILE)
 manager = ConnectionManager()
 
-def run_simulation():
-    """Function to be run in a separate thread."""
-    # Pass the command queue to the manager
-    sim_manager = SimulationManager("f1.sumocfg", command_queue=command_queue)
-    sim_manager.run(data_queue)
+@app.on_event("startup")
+def startup_event():
+    sim_manager = SimulationManager(SUMO_CONFIG_FILE, command_queue)
+    threading.Thread(target=sim_manager.run, args=(data_queue,), daemon=True).start()
+    asyncio.create_task(broadcast_data())
 
 async def broadcast_data():
-    """Continuously checks the queue for new data and broadcasts it."""
     while True:
         try:
             data = data_queue.get_nowait()
-            if data is None:
-                await manager.broadcast(json.dumps({"status": "finished"}))
-                break
+            if data is None: await manager.broadcast(json.dumps({"status": "finished"})); break
             await manager.broadcast(json.dumps(data))
-        except queue.Empty:
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            print(f"Error during broadcast: {e}")
-            break
+        except queue.Empty: await asyncio.sleep(0.05)
+        except Exception: break
 
-@app.on_event("startup")
-async def startup_event():
-    print("Starting simulation in a new thread...")
-    sim_thread = threading.Thread(target=run_simulation, daemon=True)
-    sim_thread.start()
-    
-    print("Starting data broadcaster...")
-    asyncio.create_task(broadcast_data())
+@app.get("/")
+async def get_root():
+    return HTMLResponse(open("static/index.html", "r", encoding="utf-8").read())
+
+@app.get("/network_data")
+async def get_network_data():
+    return JSONResponse(content=network_data)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        while True:
-            # MODIFIED: Wait for a message from the client
-            data = await websocket.receive_text()
-            try:
-                command_data = json.loads(data)
-                # Put the received command onto the queue for the simulation thread
-                command_queue.put(command_data)
-            except json.JSONDecodeError:
-                print(f"Received invalid JSON from client: {data}")
-
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        print("Client disconnected")
-
-@app.get("/")
-async def get():
-    with open("index.html", "r") as f:
-        return HTMLResponse(f.read())
+        while True: command_queue.put(json.loads(await websocket.receive_text()))
+    except WebSocketDisconnect: manager.disconnect(websocket)
