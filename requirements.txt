@@ -1,0 +1,13 @@
+# For the backend server and simulation
+fastapi
+uvicorn[standard]
+traci             # Make sure to install the correct SUMO version's library
+
+# For the vision processor and data handling
+ultralytics
+opencv-python
+pandas
+
+# For the DQN Agent (choose one)
+tensorflow        # For ML/AI tasks
+# torch             # Alternative to tensorflow

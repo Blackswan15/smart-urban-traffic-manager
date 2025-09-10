@@ -5,6 +5,7 @@ import threading
 import asyncio
 import queue
 import json
+import time # <-- 1. IMPORT THE TIME MODULE
 from typing import List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -83,6 +84,8 @@ class SimulationManager:
 
                 traci.simulationStep()
                 
+                time.sleep(1) # <-- 2. ADD THE 1-SECOND (1000ms) DELAY HERE
+
                 # --- Control Logic ---
                 if self.control_mode == "auto":
                     # Run the algorithm only in auto mode
@@ -114,13 +117,15 @@ class SimulationManager:
                         current_phase = traci.trafficlight.getPhase(tls_id)
                         phase_description = phase_map.get(current_phase, f"Yellow/Transition (Phase {current_phase})")
                         human_readable_data["green_direction"] = phase_description
+                
+                # Note: The 'raw_data' key is still here but not used by the dashboard. It can be removed if you want.
                 human_readable_data['raw_data'] = {
                     'vehicle_counts_per_edge': raw_vehicle_counts,
                     'traffic_light_id': list(PHASE_MAPS.keys())[0],
                     'current_phase_index': traci.trafficlight.getPhase(list(PHASE_MAPS.keys())[0])
                 }
                 data_queue.put(human_readable_data)
-                    
+                        
                 step += 1
         finally:
             traci.close()
